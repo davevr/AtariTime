@@ -105,7 +105,8 @@ def main():
         # as the script takes, and the picture is of the script's last step.
         window = ""
         for attempt in range(100):
-            window = subprocess.run([finder], capture_output=True, text=True).stdout.strip()
+            window = subprocess.run([finder, str(emulator.pid)],
+                                    capture_output=True, text=True).stdout.strip()
             if window:
                 break
             time.sleep(0.1)
@@ -116,7 +117,7 @@ def main():
         subprocess.run(["screencapture", "-x", "-o", "-l", window, shot], check=True)
         print(shot)
     finally:
-        subprocess.run(["pkill", "-9", "-f", "atari800 -config " + ROOT])
+        emulator.kill()         # only the one started here
 
 
 if __name__ == "__main__":

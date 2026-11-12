@@ -17,6 +17,10 @@
 ;  Each medfly picks its own speed when it appears and keeps it; the
 ;  speeds are higher on later waves.
 ;
+;  START begins a game.  OPTION, during a game or on the GAME OVER
+;  screen, goes back to the title screen; so does leaving the GAME OVER
+;  screen alone for a minute.
+;
 ;  HOW IT IS DRAWN
 ;    sky        a GTIA mode 9 picture: 16 shades of one blue, in bands
 ;               from dark at the top to pale at the horizon
@@ -44,6 +48,7 @@
 ;    $3800  player-missile graphics (1K, double line resolution)
 ;    $3C00  character set for everything else (1K)
 ;    $4740  the sky picture, 112 lines of 40 bytes
+;    $6000  the title screen: display list, text, picture (titlepic.asm)
 ; =====================================================================
 
         icl 'atari.inc'
@@ -116,6 +121,11 @@ XMIN    = 48
 XMAX    = 200
 
 MAXFLY  = 4                     ; one medfly per player
+
+; The title picture: 52 rows, and the top one is at this index into
+; player-missile memory (it starts 40 scan lines down the display).
+TPICROWS = 52
+TPICY   = 36
 STAGGER = 40                    ; frames between medflies coming out
 MOVERATE = 2                    ; frames to wait between sprayer steps
 
@@ -145,6 +155,9 @@ FLAPOFF = $95                   ; which wing picture this frame
 SHAPEOFF = $96                  ; which picture DRAWFLY is to draw
 TEMP2   = $97
 TRIGUP  = $98                   ; non-zero once the trigger has been let go
+OVERTMR = $99                   ; 2 bytes: frames left on the end screen
+STARTCOL = $9B                  ; PRESS START's colour this frame
+DLI1ST  = $9C                   ; 2 bytes: first display list interrupt of the frame
 
 FLYON   = $A0                   ; 4 bytes each: 0 free, 1 alive, 2 dying
 FLYX    = $A4                   ; horizontal position
@@ -218,47 +231,11 @@ CPYSPR  lda SPRAYSHP,x
         jsr MAKESKY
         jsr MAKEHILL
 
-; --- display list and character set ------------------------------------
-        lda #<DLIST
-        sta SDLSTL
-        lda #>DLIST
-        sta SDLSTH
+; --- character set and player-missile graphics ----------------------------
         lda #>CHARSET
         sta CHBAS
-
-; --- colours -------------------------------------------------------------
-        lda #CARRED
-        sta COLOR0              ; car bodies
-        lda #$0C                ; white
-        sta COLOR1              ; car windows, sprayer cab, all the text
-        lda #TYREGRY
-        sta COLOR2              ; tyres
-        lda #SPRAYCOL
-        sta COLOR3              ; the puff (see GPRIOR), and the sprayer
-        lda #SKYHUE             ; dark blue
-        sta COLOR4              ; background, and the hue of the sky
-        lda #$28                ; orange
-        sta PCOLR0              ; medflies
-        sta PCOLR1
-        sta PCOLR2
-        sta PCOLR3
-
-; --- player-missile graphics ---------------------------------------------
-; A missile normally takes the colour of its own player, which would
-; make the puff the colour of medfly 0.  Bit 4 of the priority register
-; turns on the "fifth player": all four missiles take playfield colour
-; 3 instead.  Bit 0 puts players in front of the playfield.
         lda #>PMG
         sta PMBASE              ; ANTIC fetches P/M data from here
-        lda #$11
-        sta GPRIOR
-        lda #$01
-        sta SIZEM               ; missile 0 double width: 4 colour clocks
-        lda #0
-        sta SIZEP0              ; players normal width
-        sta SIZEP1
-        sta SIZEP2
-        sta SIZEP3
         lda #$03
         sta GRACTL              ; let GTIA show players and missiles
 
@@ -272,51 +249,73 @@ CPYSPR  lda SPRAYSHP,x
         lda #200
         sta AUDF3               ; nor does the buzz
 
-; --- vertical blank routine ----------------------------------------------
-; SETVBV changes the vector safely even if a VBLANK arrives half way
-; through.  A = 7 means the deferred vector, VVBLKD.
+; --- interrupts ------------------------------------------------------------
+; The vertical blank routine first.  SETVBV changes the vector safely
+; even if a VBLANK arrives half way through.  A = 7 means the deferred
+; vector, VVBLKD.
+;
+; Then the display list interrupts.  DLI1ST holds the address of the
+; first one on whichever screen is showing; the vertical blank routine
+; copies it into the vector at the start of every frame.  $C0 in NMIEN
+; allows vertical blank interrupts ($40) and display list ones ($80).
+        lda #<DLIT1
+        sta DLI1ST
+        sta VDSLST
+        lda #>DLIT1
+        sta DLI1ST+1
+        sta VDSLST+1
         ldy #<VBI
         ldx #>VBI
         lda #7
         jsr SETVBV
-
-; --- display list interrupts ---------------------------------------------
-; Point the vector at the first one, then tell ANTIC to allow them.
-; $C0 = vertical blank interrupts ($40) + display list interrupts ($80).
-        lda #<DLISKY
-        sta VDSLST
-        lda #>DLISKY
-        sta VDSLST+1
         lda #$C0
         sta NMIEN
-
-; --- screen on -----------------------------------------------------------
-; $2E = normal width playfield ($22) + missile DMA ($04) + player DMA
-; ($08), with bit 4 clear for double line resolution.
-        lda #$2E
-        sta SDMCTL
 
         jsr SHOWSTAT
 
 ; =====================================================================
-;  TITLE
+;  TITLE SCREEN
+;
+;  MEDFLY INVASION at the top in cycling colours, the picture of the
+;  medfly, and PRESS START at the bottom blinking red and white.
+;
+;  Both lines of text are drawn in colour register 0, and so are the
+;  grey parts of the picture between them.  That works because display
+;  list interrupts give the register a different value for each: the OS
+;  shadow holds the title's colour, DLIT1 changes it to grey under the
+;  title, and DLIT3 changes it to STARTCOL above PRESS START.  All this
+;  loop has to do is keep choosing the two colours.
 ; =====================================================================
-        lda #<TITLETXT
-        ldx #>TITLETXT
-        jsr SHOWA
-WAITKEY lda #<STARTTXT
-        ldx #>STARTTXT
-        jsr SHOWB
+TITLE   jsr SETTITLE
+TITLELP jsr WAITVB
+        lda #0
+        sta ATRACT
+
+        lda RTCLOK+2            ; the frame counter, times 4, gives a hue
+        asl                     ; in the top four bits that moves on
+        asl                     ; one step every four frames
+        and #$F0
+        ora #$0A                ; with a fixed brightness
+        sta COLOR0
+
+        lda RTCLOK+2            ; bit 5 of the counter changes every 32
+        and #$20                ; frames: about half a second red, half
+        beq TITLEWH             ; a second white
+        lda #$46
+        bne TITLEST
+TITLEWH lda #$0E
+TITLEST sta STARTCOL
 
 ; START is bit 0 of CONSOL, and reads 0 while the key is down.
-WAITST  lda CONSOL
+        lda CONSOL
         and #CONSTART
-        bne WAITST
+        bne TITLELP
 
 ; =====================================================================
 ;  NEW GAME
 ; =====================================================================
 NEWGAME
+        jsr SETGAME             ; game display list, colours, P/M set-up
         lda #0                  ; rub out the messages
         ldy #19
 CLRMSG  sta MSGA,y
@@ -394,7 +393,11 @@ PLAY
         jsr WAITVB
         lda #0
         sta ATRACT              ; the joystick does not reset attract mode
-        jsr CHECKHIT
+        lda CONSOL              ; OPTION abandons the game
+        and #CONOPTION
+        bne PLAYON
+        jmp TITLE               ; too far away for a branch
+PLAYON  jsr CHECKHIT
         jsr MOVESPR
         jsr MOVEPUFF
         lda OVER
@@ -404,11 +407,180 @@ PLAY
         jsr CHKWAVE
         jmp PLAY
 
+; ---------------------------------------------------------------------
+;  The end screen.  START plays again, OPTION goes to the title screen,
+;  and so does doing nothing for a minute: 3600 frames, counted down in
+;  two bytes.
+; ---------------------------------------------------------------------
 GAMEOVER
         lda #<OVERTXT
         ldx #>OVERTXT
         jsr SHOWA
-        jmp WAITKEY
+        lda #<STARTTXT
+        ldx #>STARTTXT
+        jsr SHOWB
+        lda #<3600
+        sta OVERTMR
+        lda #>3600
+        sta OVERTMR+1
+
+OVERLP  jsr WAITVB
+        lda #0
+        sta ATRACT
+        lda CONSOL
+        and #CONSTART
+        bne OVER1
+        jmp NEWGAME
+OVER1   lda CONSOL
+        and #CONOPTION
+        beq OVERTTL
+        lda OVERTMR             ; take one from the 16-bit timer
+        bne OVER2
+        dec OVERTMR+1
+OVER2   dec OVERTMR
+        lda OVERTMR
+        ora OVERTMR+1
+        bne OVERLP
+OVERTTL jmp TITLE
+
+; =====================================================================
+;  SETGAME and SETTITLE -- change from one screen to the other
+;
+;  The two screens have different display lists, colours, interrupts
+;  and uses for the players and missiles.  Everything is changed just
+;  after a vertical blank, so that the next frame is drawn entirely the
+;  new way.  The display list and colours go in the OS shadows; the
+;  player sizes and positions have no shadows and go straight to GTIA.
+; =====================================================================
+SETGAME
+        jsr WAITVB
+        lda #<DLIST
+        sta SDLSTL
+        lda #>DLIST
+        sta SDLSTH
+        lda #<DLISKY
+        sta DLI1ST
+        lda #>DLISKY
+        sta DLI1ST+1
+
+        lda #CARRED
+        sta COLOR0              ; car bodies
+        lda #$0C                ; white
+        sta COLOR1              ; car windows, sprayer cab, all the text
+        lda #TYREGRY
+        sta COLOR2              ; tyres
+        lda #SPRAYCOL
+        sta COLOR3              ; the puff (see below), and the sprayer
+        lda #SKYHUE             ; dark blue
+        sta COLOR4              ; background, and the hue of the sky
+        lda #$28                ; orange
+        sta PCOLR0              ; medflies
+        sta PCOLR1
+        sta PCOLR2
+        sta PCOLR3
+
+; A missile normally takes the colour of its own player, which would
+; make the puff the colour of medfly 0.  Bit 4 of the priority register
+; turns on the "fifth player": all four missiles take playfield colour
+; 3 instead.  Bit 0 puts players in front of the playfield.
+        lda #$11
+        sta GPRIOR
+        lda #$01
+        sta SIZEM               ; missile 0 double width: 4 colour clocks
+        lda #0
+        sta SIZEP0              ; players normal width
+        sta SIZEP1
+        sta SIZEP2
+        sta SIZEP3
+
+; $2E = normal width playfield ($22) + missile DMA ($04) + player DMA
+; ($08), with bit 4 clear for double line resolution.
+        lda #$2E
+        sta SDMCTL
+        rts
+
+SETTITLE
+        jsr WAITVB
+        lda #<TDLIST
+        sta SDLSTL
+        lda #>TDLIST
+        sta SDLSTH
+        lda #<DLIT1
+        sta DLI1ST
+        lda #>DLIT1
+        sta DLI1ST+1
+
+        lda #<PMG               ; take the medflies and puff away
+        sta PTR
+        lda #>PMG
+        sta PTR+1
+        ldx #4
+        jsr CLRPGS
+
+; The players and missiles become parts of the picture.  Each table is
+; one byte per row of the picture, and the picture's top row is at
+; TPICY in player-missile memory.
+        ldx #TPICROWS-1
+STPM    lda TP0,x
+        sta PLAYER0+TPICY,x
+        lda TP1,x
+        sta PLAYER1+TPICY,x
+        lda TP2,x
+        sta PLAYER2+TPICY,x
+        lda TP3,x
+        sta PLAYER3+TPICY,x
+        lda TMIS,x
+        sta MISSILES+TPICY,x
+        dex
+        bpl STPM
+
+        lda #TP0X
+        sta HPOSP0
+        lda #TP1X
+        sta HPOSP1
+        lda #TP2X
+        sta HPOSP2
+        lda #TP3X
+        sta HPOSP3
+        ldx #3
+STMISX  lda TMISX,x
+        sta HPOSM0,x
+        dex
+        bpl STMISX
+
+        lda #3                  ; a player's 8 bits can be 8, 16 or 32
+        sta SIZEP0              ; colour clocks wide.  Thorax and wings
+        sta SIZEP2              ; are 32 (size 3) ...
+        sta SIZEP3
+        lda #1
+        sta SIZEP1              ; ... and the face is 16 (size 1)
+        lda #0
+        sta SIZEM               ; missiles their normal 2
+
+; Priority $14: bit 2 puts the whole playfield in front of the players,
+; and bit 4 is the fifth player again, so the feet get colour 3.
+        lda #$14
+        sta GPRIOR
+
+        lda #$0C
+        sta COLOR1              ; light grey: veins, bristles, highlights
+        lda #$44
+        sta COLOR2              ; red: eyes  (DLIT2 makes it orange lower down)
+        lda #$0E
+        sta COLOR3              ; white: feet
+        lda #$00
+        sta COLOR4              ; black background
+        lda #$A4
+        sta PCOLR0              ; blue-green: thorax
+        lda #$1A
+        sta PCOLR1              ; pale gold: face
+        lda #$96
+        sta PCOLR2              ; blue: wings
+        sta PCOLR3
+
+        lda #$2E
+        sta SDMCTL
+        rts
 
 ; =====================================================================
 ;  WAITVB -- wait for the next vertical blank
@@ -1281,6 +1453,49 @@ DLIGND  pha
         rti
 
 ; =====================================================================
+;  DISPLAY LIST INTERRUPTS FOR THE TITLE SCREEN
+;  Three again, each handing on to the next.
+; =====================================================================
+
+; --- under MEDFLY INVASION: colour 0 becomes the picture's grey ------------
+DLIT1   pha
+        lda #$06
+        sta WSYNC
+        sta COLPF0
+        lda #<DLIT2
+        sta VDSLST
+        lda #>DLIT2
+        sta VDSLST+1
+        pla
+        rti
+
+; --- under the eyes: colour 2 goes from red to orange for the mouth ---------
+; This is how the picture gets more colours than there are registers:
+; the same register is a different colour on different scan lines.
+DLIT2   pha
+        lda #$26
+        sta WSYNC
+        sta COLPF2
+        lda #<DLIT3
+        sta VDSLST
+        lda #>DLIT3
+        sta VDSLST+1
+        pla
+        rti
+
+; --- above PRESS START: colour 0 becomes this moment's red or white ---------
+DLIT3   pha
+        lda STARTCOL
+        sta WSYNC
+        sta COLPF0
+        lda #<DLIT1
+        sta VDSLST
+        lda #>DLIT1
+        sta VDSLST+1
+        pla
+        rti
+
+; =====================================================================
 ;  VBI -- deferred vertical blank routine: the sound effects
 ;
 ;  The OS calls this 60 times a second, after its own VBLANK work, no
@@ -1291,9 +1506,9 @@ DLIGND  pha
 ;  AUDC = distortion in the top 3 bits + volume in the bottom 4.
 ; =====================================================================
 VBI
-        lda #<DLISKY            ; make sure the first interrupt of the
-        sta VDSLST              ; new frame is the first of the three
-        lda #>DLISKY
+        lda DLI1ST              ; make sure the first interrupt of the
+        sta VDSLST              ; new frame is the first one of whichever
+        lda DLI1ST+1            ; screen is showing
         sta VDSLST+1
 
         lda SND1                ; the spray: white noise
@@ -1345,30 +1560,12 @@ VBIX    jmp XITVBV              ; a deferred VBI must leave this way
 ;
 ;  ":55 dta ..." is the assembler's way of writing a line 55 times.
 ; =====================================================================
-DLIST
-        dta DLBLANK8,DLBLANK8,DLBLANK8  ; 24 blank lines, off the top of the tube
-        dta 6+DLLMS,a(SCREEN)           ; status line
-        dta 7                           ; big message
-        dta 6+DLDLI                     ; small message   -> DLISKY
-        dta $0F+DLLMS,a(SKY)            ; sky, line 0
-        :55 dta $0F                     ; sky, lines 1-55
-        dta $0F+DLLMS,a(SKY2)           ; sky, line 56, across the 4K boundary
-        :53 dta $0F                     ; sky, lines 57-109
-        dta $0F+DLDLI                   ; sky, line 110   -> DLIHILL
-        dta $0F                         ; sky, line 111
-        dta 4+DLLMS,a(HILLROW)          ; mountains
-        dta 4
-        dta 4+DLDLI                     ; mountains       -> DLIGND
-        dta 4                           ; sprayer
-        dta 4,4                         ; cars
-        dta DLJVB,a(DLIST)              ; wait for VBLANK, then start again
-DLEND
+; (The list itself is further down, next to the title screen's, at $6000.)
 
 ; =====================================================================
 ;  TABLES
 ; =====================================================================
 STATTXT  dta d'SCORE 00000  WAVE 00'
-TITLETXT dta d'  MEDFLY INVASION   '
 OVERTXT  dta d'     GAME OVER      '
 STARTTXT dta d'    PRESS START     '
 
@@ -1632,5 +1829,61 @@ CARSHAPE
         dta %11000000           ; T...
         dta %00000000           ; ....
         dta %00000000           ; ....
+
+; =====================================================================
+;  THE TITLE SCREEN'S DISPLAY LIST, TEXT AND PICTURE
+;
+;  These live in a block of their own higher up in memory, out of the
+;  way of the screen memory at $3000 and the sky at $4740.  The display
+;  list shows the text and picture straight from here; nothing is
+;  copied.
+;
+;    mode 7   20 characters, 16 scan lines: the two lines of text
+;    mode D   160 pixels in four colours, 2 scan lines to a row: the
+;             picture, 52 rows
+;
+;  A blank-line instruction can ask for an interrupt too ($70 + $80).
+; =====================================================================
+        org $6000
+
+TDLIST
+        dta DLBLANK8,DLBLANK8,DLBLANK8  ; 24 blank lines, off the top of the tube
+        dta DLBLANK8
+        dta 7+DLLMS+DLDLI,a(TTEXT1)     ; MEDFLY INVASION   -> DLIT1
+        dta DLBLANK8,DLBLANK8
+        dta $0D+DLLMS,a(TPIC)           ; picture, row 0
+        :32 dta $0D                     ; rows 1-32
+        dta $0D+DLDLI                   ; row 33            -> DLIT2
+        :18 dta $0D                     ; rows 34-51
+        dta DLBLANK8,DLBLANK8
+        dta DLBLANK8+DLDLI              ;                   -> DLIT3
+        dta 7+DLLMS,a(TTEXT2)           ; PRESS START
+        dta DLJVB,a(TDLIST)
+
+; The game screen's display list, described under DISPLAY LIST above.
+; A display list must not cross a 1K boundary in memory (ANTIC's
+; counter for it is only 10 bits), and here both are safely inside one.
+DLIST
+        dta DLBLANK8,DLBLANK8,DLBLANK8  ; 24 blank lines, off the top of the tube
+        dta 6+DLLMS,a(SCREEN)           ; status line
+        dta 7                           ; big message
+        dta 6+DLDLI                     ; small message   -> DLISKY
+        dta $0F+DLLMS,a(SKY)            ; sky, line 0
+        :55 dta $0F                     ; sky, lines 1-55
+        dta $0F+DLLMS,a(SKY2)           ; sky, line 56, across the 4K boundary
+        :53 dta $0F                     ; sky, lines 57-109
+        dta $0F+DLDLI                   ; sky, line 110   -> DLIHILL
+        dta $0F                         ; sky, line 111
+        dta 4+DLLMS,a(HILLROW)          ; mountains
+        dta 4
+        dta 4+DLDLI                     ; mountains       -> DLIGND
+        dta 4                           ; sprayer
+        dta 4,4                         ; cars
+        dta DLJVB,a(DLIST)              ; wait for VBLANK, then start again
+
+TTEXT1  dta d'  MEDFLY INVASION   '
+TTEXT2  dta d'    PRESS START     '
+
+        icl 'titlepic.asm'
 
         run START

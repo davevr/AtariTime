@@ -25,7 +25,10 @@ menu, F9 quits.
 - **medfly** — Medfly Invasion. Drive a sprayer along the bottom and fire
   puffs of Malathion at medflies drifting down. A puff that misses falls on
   the car parked below you; five doses dissolve a car, and losing a car ends
-  the game. START begins a game.
+  the game. START begins a game; OPTION goes back to the title screen, as
+  does a minute on the GAME OVER screen. The title picture is drawn by
+  `medfly/titlepic.py`, which writes `medfly/titlepic.asm`; run the script
+  again after changing the picture.
 - **hello** — not a game; proves the toolchain works.
 
 ## Layout

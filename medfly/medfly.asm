@@ -104,8 +104,8 @@ HILLCOL = $B4                   ; mountain green
 GROUND  = $22                   ; dark brown
 CARRED  = $46
 TYREGRY = $06
-SPRAYCOL = $DA                  ; yellow-green: the sprayer, and a rising puff
-FALLCOL = $38                   ; orange: a puff on its way back down
+SPRAYCOL = $DA                  ; yellow-green: the sprayer
+FALLCOL = $04                   ; dark grey: a puff on its way back down
 
 ; Vertical positions, as an index into player-missile memory.  The top
 ; line of the display is index 16, and each text row is 4 more.
@@ -470,7 +470,7 @@ SETGAME
         lda #TYREGRY
         sta COLOR2              ; tyres
         lda #SPRAYCOL
-        sta COLOR3              ; the puff (see below), and the sprayer
+        sta COLOR3              ; the sprayer; the puff changes it as it flies
         lda #SKYHUE             ; dark blue
         sta COLOR4              ; background, and the hue of the sky
         lda #$28                ; orange
@@ -548,35 +548,43 @@ STMISX  lda TMISX,x
         dex
         bpl STMISX
 
-        lda #3                  ; a player's 8 bits can be 8, 16 or 32
-        sta SIZEP0              ; colour clocks wide.  Thorax and wings
-        sta SIZEP2              ; are 32 (size 3) ...
-        sta SIZEP3
-        lda #1
-        sta SIZEP1              ; ... and the face is 16 (size 1)
+        lda #1                  ; a player's 8 bits can be 8, 16 or 32
+        sta SIZEP0              ; colour clocks wide.  Patch, face and
+        sta SIZEP1              ; mouth are 16 (size 1) ...
+        sta SIZEP2
+        lda #3
+        sta SIZEP3              ; ... and the thorax is 32 (size 3)
         lda #0
         sta SIZEM               ; missiles their normal 2
 
 ; Priority $14: bit 2 puts the whole playfield in front of the players,
-; and bit 4 is the fifth player again, so the feet get colour 3.
+; so the players only show where the playfield has left a gap.  Bit 4
+; is the fifth player again: the missiles take colour register 3.
+;
+; This is where the colours come from.  A mode D picture has three
+; colours and the background.  The four players and the fifth player
+; are five more registers, so there are eight colours on the screen at
+; once, and any scan line can use all of them.
         lda #$14
         sta GPRIOR
 
-        lda #$0C
-        sta COLOR1              ; light grey: veins, bristles, highlights
+        lda #$98
+        sta COLOR1              ; 2  pale blue: wings
         lda #$44
-        sta COLOR2              ; red: eyes  (DLIT2 makes it orange lower down)
+        sta COLOR2              ; 3  red: eyes
         lda #$0E
-        sta COLOR3              ; white: feet
+        sta COLOR3              ; 4  white: bristles (the missiles)
         lda #$00
-        sta COLOR4              ; black background
-        lda #$A4
-        sta PCOLR0              ; blue-green: thorax
+        sta COLOR4              ;    black background
+        lda #$C6
+        sta PCOLR0              ; 5  green: thorax patch
         lda #$1A
-        sta PCOLR1              ; pale gold: face
-        lda #$96
-        sta PCOLR2              ; blue: wings
-        sta PCOLR3
+        sta PCOLR1              ; 6  gold: face
+        lda #$36
+        sta PCOLR2              ; 7  orange: mouth
+        lda #$A4
+        sta PCOLR3              ; 8  blue-green: thorax
+                                ; 1  is the grey DLIT1 puts in register 0
 
         lda #$2E
         sta SDMCTL
@@ -713,7 +721,7 @@ TRIGDN  lda TRIGUP
 
         lda #0
         sta TRIGUP
-        lda #SPRAYCOL
+        lda PULSE
         sta COLOR3
         lda #1
         sta PUFFST
@@ -776,12 +784,27 @@ MOVEPUFF
         sbc #2
         sta PUFFY
         cmp #MIDY+1
-        bcs PUFFSHOW
+        bcs PUFFGLOW
         lda #2                  ; got to the middle and hit nothing:
-        sta PUFFST              ; it turns round and changes colour
+        sta PUFFST              ; it turns round and goes a dead grey
         lda #FALLCOL
         sta COLOR3
 PUFFSHOW
+        jmp DRAWPUF
+
+; On the way up the puff glows: its colour is green all the time, but
+; the brightness runs up and down the PULSE table, a step each frame.
+;
+; Over the sky the puff never looks quite the colour set here.  In GTIA
+; mode 9 the fifth player keeps its hue but has the brightness of the
+; sky behind it added in, so the puff is paler the nearer it is to the
+; horizon, and the falling grey is only really dark below the sky.
+PUFFGLOW
+        lda RTCLOK+2
+        and #$07
+        tax
+        lda PULSE,x
+        sta COLOR3
         jmp DRAWPUF
 
 FALLING inc PUFFY               ; falling: 1 step a frame, half the speed
@@ -852,6 +875,9 @@ WIPECAR sta (PTR),y
         lda #1
         sta OVER
         rts
+
+; The glow of a rising puff: green (hue $C) at eight brightnesses.
+PULSE   dta $C2,$C4,$C6,$C8,$CA,$C8,$C6,$C4
 
 ; A mode 4 character is 4 pixels across, 2 bits each.  These masks
 ; each clear one pixel.
@@ -1418,7 +1444,7 @@ DLIHILL pha
 ; The background stays brown from here to the bottom of the tube,
 ; overscan included, because nothing changes it until vertical blank.
 ;
-; Colour 3 is the puff's colour, and may be a falling puff's orange.
+; Colour 3 is the puff's colour, and may be a falling puff's grey.
 ; The sprayer uses colour 3 too and is always green, so it is put back
 ; here.  The car colours are stored last because they are not needed
 ; until the row after the sprayer's.
@@ -1454,7 +1480,7 @@ DLIGND  pha
 
 ; =====================================================================
 ;  DISPLAY LIST INTERRUPTS FOR THE TITLE SCREEN
-;  Three again, each handing on to the next.
+;  Two, each handing on to the other.
 ; =====================================================================
 
 ; --- under MEDFLY INVASION: colour 0 becomes the picture's grey ------------
@@ -1462,20 +1488,6 @@ DLIT1   pha
         lda #$06
         sta WSYNC
         sta COLPF0
-        lda #<DLIT2
-        sta VDSLST
-        lda #>DLIT2
-        sta VDSLST+1
-        pla
-        rti
-
-; --- under the eyes: colour 2 goes from red to orange for the mouth ---------
-; This is how the picture gets more colours than there are registers:
-; the same register is a different colour on different scan lines.
-DLIT2   pha
-        lda #$26
-        sta WSYNC
-        sta COLPF2
         lda #<DLIT3
         sta VDSLST
         lda #>DLIT3
@@ -1852,9 +1864,7 @@ TDLIST
         dta 7+DLLMS+DLDLI,a(TTEXT1)     ; MEDFLY INVASION   -> DLIT1
         dta DLBLANK8,DLBLANK8
         dta $0D+DLLMS,a(TPIC)           ; picture, row 0
-        :32 dta $0D                     ; rows 1-32
-        dta $0D+DLDLI                   ; row 33            -> DLIT2
-        :18 dta $0D                     ; rows 34-51
+        :51 dta $0D                     ; rows 1-51
         dta DLBLANK8,DLBLANK8
         dta DLBLANK8+DLDLI              ;                   -> DLIT3
         dta 7+DLLMS,a(TTEXT2)           ; PRESS START

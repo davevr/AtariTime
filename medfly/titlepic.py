@@ -6,18 +6,21 @@ wide and 52 rows high (ANTIC mode D: each row is two scan lines, so pixels
 come out roughly square).  Only the left half is drawn here; the right half
 is its mirror image.
 
-What goes where:
-    playfield  colour 0   grey: head, legs, outlines
-               colour 1   light grey: wing veins, bristles, eye highlights
-               colour 2   red for the eyes; a display list interrupt turns
-                          it orange lower down for the mouth
-    player 0   the thorax, as a block of colour behind the bristles
-    player 1   the face, showing through a hole left in the head
-    players 2 and 3   the wings, behind their veins
-    missiles   the four outer feet (the "fifth player", colour 3)
+What goes where -- eight colours on a black background, when a playfield
+on its own has three:
+    playfield  colour 0   grey: head, legs, wing veins, outlines
+               colour 1   pale blue: the wings
+               colour 2   red: the eyes
+    missiles   colour 3   white: four bristles on the thorax (the missiles
+                          used as a "fifth player")
+    player 0   green: the patch on the thorax
+    player 1   gold: the face, showing through a hole left in the head
+    player 2   orange: the mouth
+    player 3   blue-green: the thorax
 
-The players are only 8 fat pixels across, but the playfield is in front of
-them, so wherever the playfield draws an edge the picture has a sharp one.
+The players and missiles are only a few fat pixels across, but the
+playfield is in front of them, so wherever the playfield draws an edge the
+picture has a sharp one.
 
 Run it again after changing anything:   python3 medfly/titlepic.py
 """
@@ -63,16 +66,16 @@ CX = 79.5                       # the line the picture is mirrored about
 WING = [(63, 9), (63, 14), (48, 15), (35, 11), (32, 6), (42, 3), (58, 4)]
 
 # --- left half, back to front ---------------------------------------------
-# wing: outline and two veins
+# wing: filled, then its outline and two veins drawn over the top
+for y in range(H):
+    for x in range(80):
+        if inside(WING, x, y + 0.01):
+            pic[y][x] = 2
 for i in range(len(WING)):
     (x0, y0), (x1, y1) = WING[i], WING[(i + 1) % len(WING)]
-    line(x0, y0, x1, y1, 2)
-line(62, 10, 37, 7, 2)
-line(62, 12, 45, 13, 2)
-
-# thorax: bristles over where player 0 will be
-for x, y0, y1 in [(68, 8, 12), (71, 5, 10), (75, 7, 13), (78, 4, 9)]:
-    line(x, y0, x, y1, 2)
+    line(x0, y0, x1, y1, 1)
+line(62, 10, 37, 7, 1)
+line(62, 12, 45, 13, 1)
 
 # legs, hip - knee - foot
 for (hx, hy), (kx, ky), (fx, fy) in [
@@ -88,16 +91,12 @@ ellipse(CX, 30, 6, 6, 0)
 
 # eye, its highlight, and an antenna
 ellipse(67, 24, 9, 9, 3)
-line(62, 20, 65, 17, 2)
-line(62, 21, 63, 20, 2)
-line(77, 24, 76, 29, 2)
+line(62, 20, 65, 17, 1)
+line(62, 21, 63, 20, 1)
+line(77, 25, 76, 29, 3)
 
-# mouth: a proboscis with a pad on the end (colour 2 is orange down here)
-for y in range(36, 44):
-    for x in range(77, 80):
-        pic[y][x] = 3
-ellipse(CX, 44.5, 5, 2, 3)
-line(75, 37, 73, 40, 2)
+# two palps beside the mouth (the mouth itself is player 2)
+line(75, 37, 73, 40, 1)
 
 # --- mirror ---------------------------------------------------------------
 for y in range(H):
@@ -118,17 +117,26 @@ def player(x0, width, test):
     return rows
 
 
-P0X, P1X, P2X, P3X = 64, 72, 32, 96
-p0 = player(P0X, 4, lambda x, y: ((x - CX) / 15) ** 2 + ((y - 12) / 9.0) ** 2 <= 1)
-p1 = player(P1X, 2, lambda x, y: y <= 36 and ((x - CX) / 8) ** 2 + ((y - 30) / 7.0) ** 2 <= 1)
-p2 = player(P2X, 4, lambda x, y: inside(WING, x, y + 0.01))
-p3 = player(P3X, 4, lambda x, y: inside(WING, W - 1 - x, y + 0.01))
+def mouth(x, y):
+    if 36 <= y <= 43:
+        return 77 <= x <= 82                                    # proboscis
+    return ((x - CX) / 6) ** 2 + ((y - 44.5) / 2.0) ** 2 <= 1   # pad
 
-FEET = [(14, 45), (30, 49), (128, 49), (144, 45)]      # missiles 0-3: x, top row
+
+P0X, P1X, P2X, P3X = 72, 72, 72, 64
+p0 = player(P0X, 2, lambda x, y: ((x - CX) / 7) ** 2 + ((y - 7.5) / 2.5) ** 2 <= 1)
+p1 = player(P1X, 2, lambda x, y: y <= 35 and ((x - CX) / 8) ** 2 + ((y - 30) / 7.0) ** 2 <= 1)
+p2 = player(P2X, 2, mouth)
+p3 = player(P3X, 4, lambda x, y: ((x - CX) / 15) ** 2 + ((y - 12) / 9.0) ** 2 <= 1)
+
+# Bristles.  A missile is a stripe 2 pixels wide, which is what a bristle
+# is.  Missile m is bits 2m+1 and 2m of the missile byte.
+BRISTLES = [(70, 8, 12), (75, 5, 11), (83, 5, 11), (88, 8, 12)]    # x, top, bottom
+MISX = [x for x, _, _ in BRISTLES]
 missiles = [0] * H
-for m, (x, y) in enumerate(FEET):
-    for row in (y, y + 1):
-        missiles[row] |= 3 << (m * 2)
+for m, (x, top, bottom) in enumerate(BRISTLES):
+    for y in range(top, bottom + 1):
+        missiles[y] |= 3 << (m * 2)
 
 # --- write the include file ---------------------------------------------------
 out = []
@@ -137,7 +145,7 @@ out.append("")
 out.append("; Where the players and missiles go: 48 is the left edge of the playfield.")
 for name, x in (("TP0X", P0X), ("TP1X", P1X), ("TP2X", P2X), ("TP3X", P3X)):
     out.append("%s    = %d" % (name, 48 + x))
-out.append("TMISX   dta %s" % ",".join(str(48 + x) for x, _ in FEET))
+out.append("TMISX   dta %s" % ",".join(str(48 + x) for x in MISX))
 out.append("")
 out.append("; The playfield picture: 52 rows of 40 bytes, 4 pixels to a byte.")
 out.append("TPIC")
@@ -150,9 +158,9 @@ for y in range(H):
         row.append("$%02X" % v)
     out.append("        dta " + ",".join(row[:20]) + "    ; row %d" % y)
     out.append("        dta " + ",".join(row[20:]))
-for name, what, rows in (("TP0", "player 0: thorax", p0), ("TP1", "player 1: face", p1),
-                         ("TP2", "player 2: left wing", p2), ("TP3", "player 3: right wing", p3),
-                         ("TMIS", "missiles: feet", missiles)):
+for name, what, rows in (("TP0", "player 0: thorax patch", p0), ("TP1", "player 1: face", p1),
+                         ("TP2", "player 2: mouth", p2), ("TP3", "player 3: thorax", p3),
+                         ("TMIS", "missiles: bristles", missiles)):
     out.append("")
     out.append("; %s, one byte per row" % what)
     out.append(name)

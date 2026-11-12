@@ -99,6 +99,8 @@ HILLCOL = $B4                   ; mountain green
 GROUND  = $22                   ; dark brown
 CARRED  = $46
 TYREGRY = $06
+SPRAYCOL = $DA                  ; yellow-green: the sprayer, and a rising puff
+FALLCOL = $38                   ; orange: a puff on its way back down
 
 ; Vertical positions, as an index into player-missile memory.  The top
 ; line of the display is index 16, and each text row is 4 more.
@@ -142,6 +144,7 @@ FLAPTMR = $94                   ; frame counter for the wings
 FLAPOFF = $95                   ; which wing picture this frame
 SHAPEOFF = $96                  ; which picture DRAWFLY is to draw
 TEMP2   = $97
+TRIGUP  = $98                   ; non-zero once the trigger has been let go
 
 FLYON   = $A0                   ; 4 bytes each: 0 free, 1 alive, 2 dying
 FLYX    = $A4                   ; horizontal position
@@ -230,8 +233,8 @@ CPYSPR  lda SPRAYSHP,x
         sta COLOR1              ; car windows, sprayer cab, all the text
         lda #TYREGRY
         sta COLOR2              ; tyres
-        lda #$DA                ; yellow-green
-        sta COLOR3              ; sprayer, and the puff (see GPRIOR)
+        lda #SPRAYCOL
+        sta COLOR3              ; the puff (see GPRIOR), and the sprayer
         lda #SKYHUE             ; dark blue
         sta COLOR4              ; background, and the hue of the sky
         lda #$28                ; orange
@@ -336,6 +339,7 @@ CLRMSG  sta MSGA,y
         sta OVER
         sta PUFFST
         sta MOVTMR
+        sta TRIGUP
         ldx #MAXFLY-1
 CLRFLY  sta FLYON,x
         dex
@@ -440,8 +444,9 @@ CHECKHIT
         ldx #0
 HITLOOP lsr TEMP                ; next player's bit into the carry
         bcc HITNEXT
-        lda FLYON,x
-        beq HITNEXT
+        lda FLYON,x             ; only a live one: a medfly that is still
+        cmp #1                  ; dissolving is drawn by the same player
+        bne HITNEXT             ; and would otherwise be killed twice
         jsr KILLFLY
         jsr ERASEPUF            ; the puff is used up
         lda #0
@@ -520,11 +525,24 @@ NOTLEFT lda STICK0
         lda #MOVERATE
         sta MOVTMR
 
+; One press, one puff.  Holding the trigger down does not fire again:
+; TRIGUP is set when we see the trigger let go, and a shot uses it up.
+; And there is never a second puff until the first is completely over,
+; whether it hit a medfly or went all the way back down.
 TRIGGER lda STRIG0              ; 0 = pressed
-        bne MOVEDONE
+        beq TRIGDN
+        lda #1
+        sta TRIGUP
+        rts
+TRIGDN  lda TRIGUP
+        beq MOVEDONE            ; still held from last time
         lda PUFFST
         bne MOVEDONE            ; only one puff in the air at a time
 
+        lda #0
+        sta TRIGUP
+        lda #SPRAYCOL
+        sta COLOR3
         lda #1
         sta PUFFST
         lda #PUFFY0
@@ -566,7 +584,7 @@ ERASESPR
         rts
 
 ; =====================================================================
-;  MOVEPUFF -- up to the middle of the screen, then down onto a car
+;  MOVEPUFF -- up to the middle of the screen, then slowly down onto a car
 ;
 ;  Moving a player or missile sideways is one store into a position
 ;  register.  Moving it up or down is not: its picture has to be moved
@@ -587,15 +605,15 @@ MOVEPUFF
         sta PUFFY
         cmp #MIDY+1
         bcs PUFFSHOW
-        lda #2                  ; got to the middle and hit nothing
-        sta PUFFST
+        lda #2                  ; got to the middle and hit nothing:
+        sta PUFFST              ; it turns round and changes colour
+        lda #FALLCOL
+        sta COLOR3
 PUFFSHOW
         jmp DRAWPUF
 
-FALLING lda PUFFY               ; falling: 4 steps a frame
-        clc
-        adc #4
-        sta PUFFY
+FALLING inc PUFFY               ; falling: 1 step a frame, half the speed
+        lda PUFFY               ; it went up at
         cmp #CARY
         bcc PUFFSHOW
         lda #0                  ; landed
@@ -1227,6 +1245,14 @@ DLIHILL pha
 ; --- bottom of the mountains: the ground ----------------------------------
 ; The background stays brown from here to the bottom of the tube,
 ; overscan included, because nothing changes it until vertical blank.
+;
+; Colour 3 is the puff's colour, and may be a falling puff's orange.
+; The sprayer uses colour 3 too and is always green, so it is put back
+; here.  The car colours are stored last because they are not needed
+; until the row after the sprayer's.
+;
+; There is no room to do anything more before the WSYNC: the scan line
+; this interrupt arrives on is nearly used up by the time we get here.
 DLIGND  pha
         txa
         pha
@@ -1234,11 +1260,13 @@ DLIGND  pha
         pha
         lda #GROUND
         ldx #>CHARSET           ; sprayer and car characters again
-        ldy #CARRED
+        ldy #SPRAYCOL
         sta WSYNC
         sta COLBK
         stx CHBASE
-        sty COLPF0
+        sty COLPF3
+        lda #CARRED
+        sta COLPF0
         lda #TYREGRY
         sta COLPF2
         lda #<DLISKY

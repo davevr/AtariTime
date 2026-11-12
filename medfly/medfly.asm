@@ -18,19 +18,32 @@
 ;  speeds are higher on later waves.
 ;
 ;  HOW IT IS DRAWN
+;    sky        a GTIA mode 9 picture: 16 shades of one blue, in bands
+;               from dark at the top to pale at the horizon
+;    palms      drawn into the sky picture in its darkest shade, so
+;               the only things that ever pass in front of them are
+;               players and missiles
+;    mountains  three rows of ANTIC mode 4 with a character set of
+;               their own
+;    ground     the background colour, changed to brown part way down
 ;    medflies   the four PLAYERS of player-missile graphics
 ;    the puff   MISSILE 0
 ;    sprayer    two redefined characters in ANTIC mode 4
 ;    cars       redefined characters in ANTIC mode 4, twelve per car,
 ;               and every car has its own twelve so that each one can
 ;               dissolve separately
-;    text       ANTIC mode 6 and 7 lines mixed into the display list
+;    text       ANTIC mode 6 and 7 lines at the top
+;
+;  Three display list interrupts change mode, colours and character set
+;  on the way down the screen.  See DISPLAY LIST and the DLI routines.
 ;
 ;  MEMORY
 ;    $2000  program
-;    $3000  screen memory
+;    $3000  screen memory for the text and character rows
+;    $3400  character set for the mountains
 ;    $3800  player-missile graphics (1K, double line resolution)
-;    $3C00  character set (1K)
+;    $3C00  character set for everything else (1K)
+;    $4740  the sky picture, 112 lines of 40 bytes
 ; =====================================================================
 
         icl 'atari.inc'
@@ -49,10 +62,21 @@ PLAYER3 = PMG+$380
 
 ; Where things are in screen memory.  See the display list for why.
 STATUS  = SCREEN                ; SCORE 00000  WAVE 00
-MSGA    = SCREEN+20+7*40        ; big message line
-MSGB    = MSGA+20+40            ; small message line
-SPRAYROW = MSGB+20+9*40         ; the row the sprayer drives along
+MSGA    = SCREEN+20             ; big message line
+MSGB    = SCREEN+40             ; small message line
+HILLROW = SCREEN+60             ; three rows of mountains
+SPRAYROW = HILLROW+120          ; the row the sprayer drives along
 CARROW  = SPRAYROW+40           ; two rows of cars
+
+; The sky picture.  ANTIC cannot read a picture straight across a 4K
+; boundary in memory, so the picture is placed for line 56 to begin
+; exactly at $5000, and the display list points ANTIC there afresh.
+SKY     = $5000-56*40
+SKY2    = $5000
+SKYLINES = 112
+
+HILLSET = $3400                 ; the mountains' own character set
+TRUNKCH = 9                     ; add to a mountain character for one with a trunk
 
 SCOREDIG = STATUS+6             ; five score digits
 WAVEDIG = STATUS+18             ; two wave digits
@@ -67,6 +91,14 @@ NINE1   = $1A+TEXTCOL           ; one past the digit 9
 SPRAYCH = 64                    ; sprayer, 2 characters
 CARCH   = 66                    ; cars, 5 cars * 12 characters
 CARGLYPH = CHARSET+CARCH*8      ; where car 0's twelve characters live
+
+; Colours.  A colour byte is hue * 16 + brightness.
+SKYHUE  = $90                   ; blue; mode 9 supplies the brightness
+HORIZON = $9E                   ; the palest sky, behind the mountains
+HILLCOL = $B4                   ; mountain green
+GROUND  = $22                   ; dark brown
+CARRED  = $46
+TYREGRY = $06
 
 ; Vertical positions, as an index into player-missile memory.  The top
 ; line of the display is index 16, and each text row is 4 more.
@@ -106,14 +138,19 @@ OVER    = $90                   ; non-zero when a car has dissolved
 SND1    = $91                   ; sound timers, counted down in the VBI
 SND2    = $92
 SND3    = $93
+FLAPTMR = $94                   ; frame counter for the wings
+FLAPOFF = $95                   ; which wing picture this frame
+SHAPEOFF = $96                  ; which picture DRAWFLY is to draw
+TEMP2   = $97
 
-FLYON   = $A0                   ; 4 bytes each: is this medfly alive?
+FLYON   = $A0                   ; 4 bytes each: 0 free, 1 alive, 2 dying
 FLYX    = $A4                   ; horizontal position
 FLYY    = $A8                   ; vertical position
 FLYDX   = $AC                   ; +1 or -1 ($FF)
 FLYDY   = $B0                   ; +1 or -1 ($FF)
 FLYSPD  = $B4                   ; speed, in 256ths of a step per frame
 FLYFRC  = $B8                   ; fraction of a step saved up so far
+FLYTMR  = $BC                   ; frames left of its death
 
 CARHITS = $C0                   ; 5 bytes: doses each car has had
 
@@ -136,7 +173,7 @@ START
         sta PTR
         lda #>SCREEN
         sta PTR+1
-        ldx #4
+        ldx #5                  ; as far as the mountains' character set
         jsr CLRPGS
         lda #<PMG
         sta PTR
@@ -174,6 +211,10 @@ CPYSPR  lda SPRAYSHP,x
         dex
         bpl CPYSPR
 
+; --- scenery ---------------------------------------------------------------
+        jsr MAKESKY
+        jsr MAKEHILL
+
 ; --- display list and character set ------------------------------------
         lda #<DLIST
         sta SDLSTL
@@ -183,16 +224,16 @@ CPYSPR  lda SPRAYSHP,x
         sta CHBAS
 
 ; --- colours -------------------------------------------------------------
-        lda #$46                ; red
+        lda #CARRED
         sta COLOR0              ; car bodies
         lda #$0C                ; white
         sta COLOR1              ; car windows, sprayer cab, all the text
-        lda #$06                ; grey
+        lda #TYREGRY
         sta COLOR2              ; tyres
         lda #$DA                ; yellow-green
         sta COLOR3              ; sprayer, and the puff (see GPRIOR)
-        lda #$00                ; black
-        sta COLOR4              ; background
+        lda #SKYHUE             ; dark blue
+        sta COLOR4              ; background, and the hue of the sky
         lda #$28                ; orange
         sta PCOLR0              ; medflies
         sta PCOLR1
@@ -235,6 +276,16 @@ CPYSPR  lda SPRAYSHP,x
         ldx #>VBI
         lda #7
         jsr SETVBV
+
+; --- display list interrupts ---------------------------------------------
+; Point the vector at the first one, then tell ANTIC to allow them.
+; $C0 = vertical blank interrupts ($40) + display list interrupts ($80).
+        lda #<DLISKY
+        sta VDSLST
+        lda #>DLISKY
+        sta VDSLST+1
+        lda #$C0
+        sta NMIEN
 
 ; --- screen on -----------------------------------------------------------
 ; $2E = normal width playfield ($22) + missile DMA ($04) + player DMA
@@ -402,22 +453,14 @@ HITDONE sta HITCLR
         rts
 
 ; ---------------------------------------------------------------------
-;  KILLFLY -- medfly X is dead.  Keeps X.
+;  KILLFLY -- medfly X has been sprayed.  Keeps X.
 ; ---------------------------------------------------------------------
 KILLFLY
         stx FLY
-        lda #0
-        sta FLYON,x
-        lda PLRLO,x             ; wipe that player's whole stripe
-        sta PTR
-        lda PLRHI,x
-        sta PTR+1
-        ldy #127
-        lda #0
-KILLCLR sta (PTR),y
-        dey
-        bpl KILLCLR
-        dec ALIVE
+        lda #2
+        sta FLYON,x             ; dying: MOVEFLY plays out the animation
+        lda #32
+        sta FLYTMR,x
         lda #15
         sta SND2                ; squeal
         jsr ADDSCORE
@@ -688,26 +731,79 @@ SPAWNSPD
         inc ALIVE
         lda #STAGGER
         sta SPWNTMR
+        lda FLAPOFF
+        sta SHAPEOFF
         jmp DRAWFLY
 
 ; =====================================================================
-;  MOVEFLY -- move every medfly that is due to move
+;  MOVEFLY -- move and animate every medfly
 ;
 ;  Speeds are less than one step a frame, so each medfly saves up
 ;  fractions.  Add its speed to its fraction byte every frame; when the
 ;  byte overflows, the carry says it has saved up a whole step.
+;
+;  Every medfly is redrawn every frame whether it moved or not, because
+;  its wings may have.  There are three wing pictures, shown in the
+;  order spread, half, back, half, each for four frames.
 ; =====================================================================
 MOVEFLY
+        inc FLAPTMR
+        lda FLAPTMR
+        lsr
+        lsr
+        and #$03
+        tax
+        lda FLAPSEQ,x
+        sta FLAPOFF
+
         ldx #MAXFLY-1
 FLYLOOP stx FLY
         lda FLYON,x
         beq FLYNEXT
-        clc
+        cmp #1
+        bne FLYDYING
+
+        clc                     ; alive
         lda FLYFRC,x
         adc FLYSPD,x
         sta FLYFRC,x
-        bcc FLYNEXT
+        bcc FLYSHOW
         jsr STEPFLY
+FLYSHOW lda FLAPOFF
+        sta SHAPEOFF
+        jsr DRAWFLY
+        jmp FLYNEXT
+
+; A sprayed medfly stays where it is and dissolves through four
+; pictures, eight frames each.  Its timer counts 31 down to 0, so the
+; timer divided by 8 says which picture: 3, 2, 1, 0.  Until it has
+; finished it still occupies its player, and still counts as on screen.
+FLYDYING
+        dec FLYTMR,x
+        beq FLYGONE
+        lda FLYTMR,x
+        lsr
+        lsr
+        lsr
+        tay
+        lda DIEOFF,y
+        sta SHAPEOFF
+        jsr DRAWFLY
+        jmp FLYNEXT
+
+FLYGONE lda #0
+        sta FLYON,x
+        lda PLRLO,x             ; wipe that player's whole stripe
+        sta PTR
+        lda PLRHI,x
+        sta PTR+1
+        ldy #127
+        lda #0
+FLYWIPE sta (PTR),y
+        dey
+        bpl FLYWIPE
+        dec ALIVE
+
 FLYNEXT ldx FLY
         dex
         bpl FLYLOOP
@@ -749,20 +845,22 @@ STEPX   lda FLYX,x
         bcs STEPRGT
         lda #1                  ; bounced off the left edge
         sta FLYDX,x
-        bne DRAWFLY
+        rts
 STEPRGT cmp #XMAX
-        bcc DRAWFLY
+        bcc STEPDONE
         lda #$FF                ; bounced off the right edge
         sta FLYDX,x
-                                ; fall through into DRAWFLY
+STEPDONE
+        rts
 
 ; ---------------------------------------------------------------------
-;  DRAWFLY -- put medfly X (also in FLY) on the screen
+;  DRAWFLY -- put medfly X (also in FLY) on the screen, using the
+;  picture that starts SHAPEOFF bytes into the FLYSHP table
 ;
-;  The shape table has an empty byte above and below the medfly.  A
-;  medfly only ever moves one step at a time, so drawing the shape one
-;  byte higher or lower than before automatically rubs out the line it
-;  left behind.  No separate erase is needed.
+;  Every picture has an empty byte above and below the medfly.  A
+;  medfly only ever moves one step at a time, so drawing the picture
+;  one byte higher or lower than before automatically rubs out the line
+;  it left behind.  No separate erase is needed.
 ; ---------------------------------------------------------------------
 DRAWFLY
         lda FLYX,x
@@ -773,12 +871,14 @@ DRAWFLY
         sta PTR+1
         ldy FLYY,x
         dey                     ; start at the empty byte above
-        ldx #0
+        ldx SHAPEOFF
+        lda #10
+        sta COUNT
 DRAWLP  lda FLYSHP,x
         sta (PTR),y
         iny
         inx
-        cpx #10
+        dec COUNT
         bne DRAWLP
         ldx FLY
         rts
@@ -859,6 +959,300 @@ CLRPGS1 sta (PTR),y
         rts
 
 ; =====================================================================
+;  MAKESKY -- paint the sky and the palm trees
+;
+;  The sky is an ANTIC mode F picture shown through GTIA mode 9.  In
+;  that mode a byte is two pixels, four bits each, and the four bits
+;  are a brightness from 0 to 15 of the one hue held in the background
+;  colour register.  16 bands of 7 lines make the 112 lines, and band N
+;  is filled with brightness N: $00, $11, $22 ... $FF.
+; =====================================================================
+MAKESKY
+        lda #<SKY
+        sta PTR
+        lda #>SKY
+        sta PTR+1
+        lda #0
+        sta TEMP                ; this band's byte
+SKYBAND ldx #7
+SKYLINE ldy #39
+        lda TEMP
+SKYFILL sta (PTR),y
+        dey
+        bpl SKYFILL
+        jsr NEXTLINE
+        dex
+        bne SKYLINE
+        lda TEMP
+        clc
+        adc #$11
+        sta TEMP
+        bcc SKYBAND             ; $FF + $11 carries: all 16 done
+
+; Palms.  A palm is cut out of the sky with AND masks: wherever the
+; mask has a 0 nybble the pixel becomes brightness 0, the darkest blue.
+; The crown is 5 rows of the PALMSHP table, each used for 3 lines
+; because a mode 9 pixel is four times as wide as it is high.  The
+; trunk is one pixel wide and runs on down to the last line of the sky.
+        ldx #NPALMS-1
+PALM    stx TEMP2
+        lda PALMX,x             ; PTR = SKY + 40 * top line + byte across
+        clc
+        adc #<SKY
+        sta PTR
+        lda #>SKY
+        adc #0
+        sta PTR+1
+        ldy PALMTOP,x
+PALMDN  jsr NEXTLINE
+        dey
+        bne PALMDN
+
+        lda #0
+        sta TEMP                ; index of this row of the crown
+PALMROW lda #3
+        sta COUNT
+PALMLN  ldy #0
+        ldx TEMP
+PALMAND lda (PTR),y
+        and PALMSHP,x
+        sta (PTR),y
+        inx
+        iny
+        cpy #5
+        bne PALMAND
+        jsr NEXTLINE
+        dec COUNT
+        bne PALMLN
+        lda TEMP
+        clc
+        adc #5
+        sta TEMP
+        cmp #25
+        bne PALMROW
+
+        ldx TEMP2               ; trunk: from under the crown to the
+        lda #SKYLINES-15        ; bottom of the sky
+        sec
+        sbc PALMTOP,x
+        tax
+        ldy #2                  ; the trunk is the left pixel of byte 2
+PALMTRK lda (PTR),y
+        and #$0F
+        sta (PTR),y
+        jsr NEXTLINE
+        dex
+        bne PALMTRK
+
+        ldx TEMP2
+        dex
+        bpl PALM
+        rts
+
+; Move PTR down one line of the sky picture.  Keeps X and Y.
+NEXTLINE
+        lda PTR
+        clc
+        adc #40
+        sta PTR
+        bcc NEXTLN1
+        inc PTR+1
+NEXTLN1 rts
+
+; =====================================================================
+;  MAKEHILL -- the mountains
+;
+;  The mountains are three rows of mode 4 characters with a character
+;  set of their own, switched in by a display list interrupt.  The set
+;  only needs ten characters:
+;      0       empty (sky)
+;      1 - 8   green in the bottom 1 to 8 lines
+;      9 - 17  the same nine again with a palm trunk down the left half
+;  MTNHGT says how many lines high the mountains are in each of the 40
+;  columns, from 0 to 24.  Each column is then three characters: as
+;  much of the height as fits in the bottom one, then the middle, then
+;  the top.
+; =====================================================================
+MAKEHILL
+; Characters 1 to 8.  X counts through their 64 bytes.  A byte is line
+; (X and 7) of character (X / 8) + 1, and that character is green from
+; line 8 - number downwards, which comes to: line + X / 8 >= 7.
+        ldx #0
+HILLCH  txa
+        and #$07
+        sta TEMP
+        txa
+        lsr
+        lsr
+        lsr
+        clc
+        adc TEMP
+        cmp #7
+        lda #0
+        bcc HILLCH1
+        lda #%01010101          ; four pixels of colour 0
+HILLCH1 sta HILLSET+8,x
+        inx
+        cpx #64
+        bne HILLCH
+
+; Characters 9 to 17: copy 0 to 8 and set the two left-hand pixels to
+; colour 2.  A mode 9 pixel in the sky is half a character wide, so
+; half a character is what joins up with the trunk coming down.
+        ldx #71
+HILLTRK lda HILLSET,x
+        ora #%11110000
+        sta HILLSET+TRUNKCH*8,x
+        dex
+        bpl HILLTRK
+
+        ldy #39                 ; the three rows
+HILLCOLM
+        lda MTNHGT,y
+        sec
+        jsr CLAMP8
+        sta HILLROW+80,y
+        lda MTNHGT,y
+        sec
+        sbc #8
+        jsr CLAMP8
+        sta HILLROW+40,y
+        lda MTNHGT,y
+        sec
+        sbc #16
+        jsr CLAMP8
+        sta HILLROW,y
+        dey
+        bpl HILLCOLM
+
+        ldx #NPALMS-1           ; the palm trunks carry on down in front:
+HILLPLM ldy PALMCOL,x           ; swap the three characters in each
+        lda HILLROW,y           ; trunk's column for the ones with trunks
+        clc
+        adc #TRUNKCH
+        sta HILLROW,y
+        lda HILLROW+40,y
+        clc
+        adc #TRUNKCH
+        sta HILLROW+40,y
+        lda HILLROW+80,y
+        clc
+        adc #TRUNKCH
+        sta HILLROW+80,y
+        dex
+        bpl HILLPLM
+        rts
+
+; What is left of the height after a subtraction, held between 0 and 8.
+; Carry clear means the subtraction went below zero.
+CLAMP8  bcc CLAMP0
+        cmp #9
+        bcc CLAMPX
+        lda #8
+CLAMPX  rts
+CLAMP0  lda #0
+        rts
+
+; =====================================================================
+;  DISPLAY LIST INTERRUPTS
+;
+;  A display list instruction with bit 7 set makes ANTIC interrupt the
+;  6502 at the start of that row's last scan line.  The routine stores
+;  into WSYNC, which holds the 6502 until the line has been drawn, and
+;  then changes the hardware registers while the beam is off the edge
+;  of the picture.  The new values apply from the next line down.
+;
+;  These go to the hardware registers, not the OS shadows.  At the next
+;  vertical blank the OS copies the shadows back, so the top of the
+;  screen always starts with the ordinary colours.
+;
+;  There are three, and there is only one vector, so each one finishes
+;  by pointing the vector at the next.
+; =====================================================================
+
+; --- under the text lines: into GTIA mode 9 for the sky ------------------
+; Bit 6 of PRIOR is mode 9.  The $11 is what GPRIOR already holds.
+DLISKY  pha
+        lda #$51
+        sta WSYNC
+        sta PRIOR
+        lda #<DLIHILL
+        sta VDSLST
+        lda #>DLIHILL
+        sta VDSLST+1
+        pla
+        rti
+
+; --- bottom of the sky: back to ordinary colour for the mountains ---------
+; Mode 9 takes no notice of the playfield colour registers, so the
+; mountain and trunk colours can go in early, while the last line of
+; sky is still being drawn.  That matters: the first scan line of a row
+; of characters is when ANTIC fetches the row from memory, and it stops
+; the 6502 to do it, so anything stored after WSYNC arrives late.  The
+; three that must change exactly at the edge go in A, X and Y, to be
+; stored the instant WSYNC lets go.
+;
+; A sky line is one scan line, and ANTIC takes most of it to fetch the
+; picture.  By the time the OS has handed the interrupt on to us and we
+; have got this far, the line that asked for it is over and the next
+; one has begun.  So the interrupt is asked for on line 110, and the
+; WSYNC below ends up waiting for the end of line 111.
+DLIHILL pha
+        txa
+        pha
+        tya
+        pha
+        lda #HILLCOL
+        sta COLPF0              ; mountains
+        lda #SKYHUE
+        sta COLPF2              ; trunks, the same dark blue as up in the sky
+        lda #$11                ; GTIA mode off
+        ldx #HORIZON            ; pale sky behind the mountains
+        ldy #>HILLSET           ; the mountains' character set
+        sta WSYNC               ; end of line 111, the last of the sky
+        sta PRIOR
+        stx COLBK
+        sty CHBASE
+        lda #<DLIGND
+        sta VDSLST
+        lda #>DLIGND
+        sta VDSLST+1
+        pla
+        tay
+        pla
+        tax
+        pla
+        rti
+
+; --- bottom of the mountains: the ground ----------------------------------
+; The background stays brown from here to the bottom of the tube,
+; overscan included, because nothing changes it until vertical blank.
+DLIGND  pha
+        txa
+        pha
+        tya
+        pha
+        lda #GROUND
+        ldx #>CHARSET           ; sprayer and car characters again
+        ldy #CARRED
+        sta WSYNC
+        sta COLBK
+        stx CHBASE
+        sty COLPF0
+        lda #TYREGRY
+        sta COLPF2
+        lda #<DLISKY
+        sta VDSLST
+        lda #>DLISKY
+        sta VDSLST+1
+        pla
+        tay
+        pla
+        tax
+        pla
+        rti
+
+; =====================================================================
 ;  VBI -- deferred vertical blank routine: the sound effects
 ;
 ;  The OS calls this 60 times a second, after its own VBLANK work, no
@@ -869,6 +1263,11 @@ CLRPGS1 sta (PTR),y
 ;  AUDC = distortion in the top 3 bits + volume in the bottom 4.
 ; =====================================================================
 VBI
+        lda #<DLISKY            ; make sure the first interrupt of the
+        sta VDSLST              ; new frame is the first of the three
+        lda #>DLISKY
+        sta VDSLST+1
+
         lda SND1                ; the spray: white noise
         beq VBI2
         dec SND1
@@ -907,22 +1306,35 @@ VBIX    jmp XITVBV              ; a deferred VBI must leave this way
 ;    mode 4   40 characters, 8 scan lines, four colours in a character
 ;    mode 6   20 characters, 8 scan lines, one colour per character
 ;    mode 7   20 characters, 16 scan lines, one colour per character
+;    mode F   320 dots, 1 scan line -- which GTIA mode 9 turns into 80
+;             pixels of 16 brightnesses
 ;
-;  8 + 7*8 + 16 + 8 + 8 + 9*8 + 3*8 = 192 scan lines, a full screen.
-;  The rows marked "sky" hold nothing but spaces; the medflies and the
-;  puff are players and missiles and are not in screen memory at all.
+;  8 + 16 + 8 + 112 + 3*8 + 8 + 2*8 = 192 scan lines, a full screen.
+;
+;  Adding $40 (DLLMS) to an instruction makes ANTIC take the two bytes
+;  after it as the address of the screen memory to use from there on.
+;  Adding $80 (DLDLI) asks for a display list interrupt on that row.
+;
+;  ":55 dta ..." is the assembler's way of writing a line 55 times.
 ; =====================================================================
 DLIST
         dta DLBLANK8,DLBLANK8,DLBLANK8  ; 24 blank lines, off the top of the tube
-        dta 6+DLLMS,a(SCREEN)           ; status line; screen memory is at SCREEN
-        dta 4,4,4,4,4,4,4               ; sky
+        dta 6+DLLMS,a(SCREEN)           ; status line
         dta 7                           ; big message
-        dta 4                           ; sky
-        dta 6                           ; small message
-        dta 4,4,4,4,4,4,4,4,4           ; sky
+        dta 6+DLDLI                     ; small message   -> DLISKY
+        dta $0F+DLLMS,a(SKY)            ; sky, line 0
+        :55 dta $0F                     ; sky, lines 1-55
+        dta $0F+DLLMS,a(SKY2)           ; sky, line 56, across the 4K boundary
+        :53 dta $0F                     ; sky, lines 57-109
+        dta $0F+DLDLI                   ; sky, line 110   -> DLIHILL
+        dta $0F                         ; sky, line 111
+        dta 4+DLLMS,a(HILLROW)          ; mountains
+        dta 4
+        dta 4+DLDLI                     ; mountains       -> DLIGND
         dta 4                           ; sprayer
         dta 4,4                         ; cars
         dta DLJVB,a(DLIST)              ; wait for VBLANK, then start again
+DLEND
 
 ; =====================================================================
 ;  TABLES
@@ -943,19 +1355,117 @@ CARCODE dta CARCH,CARCH+12,CARCH+24,CARCH+36,CARCH+48
 CARGLO  dta <CARGLYPH,<(CARGLYPH+96),<(CARGLYPH+192),<(CARGLYPH+288),<(CARGLYPH+384)
 CARGHI  dta >CARGLYPH,>(CARGLYPH+96),>(CARGLYPH+192),>(CARGLYPH+288),>(CARGLYPH+384)
 
-; The medfly: a player is 8 bits wide, one bit per pixel.  The empty
-; bytes top and bottom do the erasing (see DRAWFLY).
+; The medfly, seen from above: head at the top, wings either side.  A
+; player is 8 bits wide, one bit per pixel.  Seven
+; pictures of 10 bytes: three for the wings, four for dying.  The empty
+; bytes top and bottom of each do the erasing (see DRAWFLY).
 FLYSHP
+                                ; wings spread
         dta %00000000
-        dta %10000001           ; X......X
-        dta %11011011           ; XX.XX.XX
-        dta %11111111           ; XXXXXXXX
-        dta %01111110           ; .XXXXXX.
-        dta %00111100           ; ..XXXX..
-        dta %01011010           ; .X.XX.X.
         dta %00111100           ; ..XXXX..
         dta %00011000           ; ...XX...
+        dta %11011011           ; XX.XX.XX
+        dta %11111111           ; XXXXXXXX
+        dta %11011011           ; XX.XX.XX
+        dta %10011001           ; X..XX..X
+        dta %00011000           ; ...XX...
+        dta %00011000           ; ...XX...
         dta %00000000
+                                ; wings half
+        dta %00000000
+        dta %00111100           ; ..XXXX..
+        dta %00011000           ; ...XX...
+        dta %01011010           ; .X.XX.X.
+        dta %11111111           ; XXXXXXXX
+        dta %11011011           ; XX.XX.XX
+        dta %11011011           ; XX.XX.XX
+        dta %10011001           ; X..XX..X
+        dta %00011000           ; ...XX...
+        dta %00000000
+                                ; wings back
+        dta %00000000
+        dta %00111100           ; ..XXXX..
+        dta %00011000           ; ...XX...
+        dta %00011000           ; ...XX...
+        dta %01111110           ; .XXXXXX.
+        dta %01011010           ; .X.XX.X.
+        dta %01011010           ; .X.XX.X.
+        dta %01011010           ; .X.XX.X.
+        dta %00011000           ; ...XX...
+        dta %00000000
+                                ; dissolving 1
+        dta %00000000
+        dta %00101100           ; ..X.XX..
+        dta %00010000           ; ...X....
+        dta %01011010           ; .X.XX.X.
+        dta %10110111           ; X.XX.XXX
+        dta %11001010           ; XX..X.X.
+        dta %01011011           ; .X.XX.XX
+        dta %10010001           ; X..X...X
+        dta %00001000           ; ....X...
+        dta %00000000
+                                ; dissolving 2
+        dta %00000000
+        dta %00100100           ; ..X..X..
+        dta %00000000           ; ........
+        dta %01001000           ; .X..X...
+        dta %10010010           ; X..X..X.
+        dta %01000010           ; .X....X.
+        dta %00010010           ; ...X..X.
+        dta %10000000           ; X.......
+        dta %00001000           ; ....X...
+        dta %00000000
+                                ; dissolving 3
+        dta %00000000
+        dta %00100000           ; ..X.....
+        dta %00000000           ; ........
+        dta %00001000           ; ....X...
+        dta %10000010           ; X.....X.
+        dta %00000000           ; ........
+        dta %00010000           ; ...X....
+        dta %00000000           ; ........
+        dta %00001000           ; ....X...
+        dta %00000000
+                                ; dissolving 4
+        dta %00000000
+        dta %00000000           ; ........
+        dta %00000000           ; ........
+        dta %00001000           ; ....X...
+        dta %00000000           ; ........
+        dta %00000000           ; ........
+        dta %00010000           ; ...X....
+        dta %00000000           ; ........
+        dta %00000000           ; ........
+        dta %00000000
+
+; How far into FLYSHP each picture starts.
+FLAPSEQ dta 0,10,20,10          ; spread, half, back, half
+DIEOFF  dta 60,50,40,30         ; by timer / 8, so the last comes first
+
+; The mountains: height in scan lines, 0 to 24, for each of 40 columns.
+MTNHGT
+        dta 19,22,21,18,14,11,10,11,12,11
+        dta 8,4,2,2,4,8,13,14,14,13
+        dta 13,14,18,20,21,18,13,8,5,5
+        dta 7,8,8,6,3,3,5,10,15,18
+
+; The palms: how many bytes across the sky picture the crown starts,
+; how many lines down its top is, and the screen column its trunk comes
+; down in.  A byte of the sky is as wide as a character, and the trunk
+; is in the crown's third byte, so that is bytes across + 2.
+NPALMS  = 3
+PALMX   dta 2,17,31
+PALMTOP dta 50,28,62
+PALMCOL dta 4,19,33
+
+; A palm crown, 10 pixels wide, as AND masks.  A mode 9 pixel is one
+; hex digit: F leaves the sky alone, 0 cuts the palm out of it.
+PALMSHP
+        dta $FF,$00,$FF,$00,$FF ; ..XX..XX..
+        dta $F0,$00,$00,$00,$0F ; .XXXXXXXX.
+        dta $00,$F0,$00,$0F,$00 ; XX.XXXX.XX
+        dta $0F,$F0,$00,$0F,$F0 ; X..XXXX..X
+        dta $0F,$FF,$00,$FF,$F0 ; X...XX...X
 
 ; Mode 4 characters are 4 pixels wide and each pixel is 2 bits:
 ;   00 background   01 colour 0   10 colour 1   11 colour 2

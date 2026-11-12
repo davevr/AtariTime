@@ -1,0 +1,7 @@
+# assembler output, listings, screenshots and playback files
+build/
+# the MADS binary built by tools/install-mads.sh
+tools/mads
+# in case the emulator ever manages to download Atari's ROMs here
+rom/
+.DS_Store

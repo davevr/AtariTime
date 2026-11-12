@@ -20,6 +20,14 @@ In the emulator, joystick 1 is **W A S D** with **left Control** as the
 trigger. F2 is OPTION, F3 SELECT, F4 START, F5 RESET, F1 the emulator's own
 menu, F9 quits.
 
+## Games
+
+- **medfly** — Medfly Invasion. Drive a sprayer along the bottom and fire
+  puffs of Malathion at medflies drifting down. A puff that misses falls on
+  the car parked below you; five doses dissolve a car, and losing a car ends
+  the game. START begins a game.
+- **hello** — not a game; proves the toolchain works.
+
 ## Layout
 
 | | |
@@ -61,7 +69,8 @@ tools/play.py mygame idle:120 start:5 idle:30 right:60 fire:5 idle:30
 ```
 
 builds the game, runs it while feeding it that input (60 frames = 1 second),
-and saves a screenshot of the window to `build/mygame.png`. Run
+and saves a screenshot of the window, taken at the end of the last step, to
+`build/mygame.png`. Run
 `tools/play.py` with no arguments for the list of controls. It can show
 that a game draws the right thing and reacts to input; it cannot judge
 sound, or how the controls feel.

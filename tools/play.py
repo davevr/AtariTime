@@ -75,11 +75,24 @@ def main():
         lines += frame_lines(what) * count
         frames += count
 
+    # When the emulator runs off the end of a playback file it reads one
+    # garbage frame with the trigger down.  So the file never ends while we
+    # are watching: after the script comes ten seconds of nothing held, and
+    # the screenshot is taken at the start of that.
+    lines += frame_lines("idle") * 600
+
     build = os.path.join(ROOT, "build")
     subprocess.run([os.path.join(ROOT, "run.sh"), "-b", game], check=True)
     playback = os.path.join(build, game + ".playback")
     with open(playback, "w") as f:
         f.write("\n".join(lines) + "\n")
+
+    # tools/winid.swift finds the emulator's window.  Compile it once; run
+    # as a script it takes a second to start, which spoils the timing.
+    finder = os.path.join(build, "winid")
+    source = os.path.join(ROOT, "tools", "winid.swift")
+    if not os.path.exists(finder) or os.path.getmtime(finder) < os.path.getmtime(source):
+        subprocess.run(["swiftc", "-O", "-o", finder, source], check=True)
 
     emulator = subprocess.Popen(
         [os.path.join(ROOT, "tools", "emulator.sh"), "-nosound",
@@ -87,10 +100,16 @@ def main():
          "-run", os.path.join(build, game + ".xex")],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        time.sleep(3 + frames / 60.0)     # start-up, then the script in real time
-        window = subprocess.run(
-            ["swift", os.path.join(ROOT, "tools", "winid.swift")],
-            capture_output=True, text=True).stdout.strip()
+        # The script starts when the emulator does, and the emulator's window
+        # appears at that moment.  So wait for the window, then for as long
+        # as the script takes, and the picture is of the script's last step.
+        window = ""
+        for attempt in range(100):
+            window = subprocess.run([finder], capture_output=True, text=True).stdout.strip()
+            if window:
+                break
+            time.sleep(0.1)
+        time.sleep(frames / 60.0)
         if not window:
             sys.exit("could not find the emulator window")
         shot = os.path.join(build, game + ".png")
